@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Tracker.Issue do
     :url,
     :assignee_id,
     blocked_by: [],
+    agent_messages: [],
     labels: [],
     dispatchable: false,
     created_at: nil,
@@ -40,6 +41,7 @@ defmodule SymphonyElixir.Tracker.Issue do
           assignee_id: String.t() | nil,
           labels: [String.t()],
           blocked_by: [map()],
+          agent_messages: [map()],
           dispatchable: boolean(),
           created_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
@@ -51,13 +53,39 @@ defmodule SymphonyElixir.Tracker.Issue do
   end
 
   @spec routable?(t(), [String.t()]) :: boolean()
-  def routable?(%__MODULE__{dispatchable: true, labels: labels}, required_labels)
-      when is_list(labels) and is_list(required_labels) do
+  def routable?(issue, required_labels), do: routable?(issue, required_labels, [])
+
+  @spec routable?(t(), [String.t()], [String.t()]) :: boolean()
+
+  def routable?(%__MODULE__{dispatchable: true, labels: labels}, required_labels, excluded_labels)
+      when is_list(labels) and is_list(required_labels) and is_list(excluded_labels) do
     issue_labels = MapSet.new(labels, &normalize_label/1)
-    Enum.all?(required_labels, &MapSet.member?(issue_labels, normalize_label(&1)))
+
+    Enum.all?(required_labels, fn
+      "repo:*" ->
+        case Enum.filter(issue_labels, &String.starts_with?(&1, "repo:")) do
+          [label] -> Regex.match?(~r/^repo:[a-z0-9][a-z0-9._-]*$/, label)
+          _ -> false
+        end
+
+      label ->
+        MapSet.member?(issue_labels, normalize_label(label))
+    end) and
+      not Enum.any?(excluded_labels, &MapSet.member?(issue_labels, normalize_label(&1)))
   end
 
-  def routable?(%__MODULE__{}, _required_labels), do: false
+  def routable?(%__MODULE__{}, _required_labels, _excluded_labels), do: false
+
+  @spec repository_labels(t() | nil) :: [String.t()]
+  def repository_labels(%__MODULE__{labels: labels}) do
+    labels
+    |> Enum.map(&normalize_label/1)
+    |> Enum.filter(&String.starts_with?(&1, "repo:"))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  def repository_labels(nil), do: []
 
   defp normalize_label(label) when is_binary(label) do
     label

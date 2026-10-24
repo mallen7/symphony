@@ -19,6 +19,11 @@ defmodule SymphonyElixir.ExtensionsTest do
       send(self(), {:fetch_issues_by_ids_called, issue_ids})
       {:ok, issue_ids}
     end
+
+    def fetch_issues_with_agent_messages(states) do
+      send(self(), {:fetch_issues_with_agent_messages_called, states})
+      {:ok, states}
+    end
   end
 
   defmodule SlowOrchestrator do
@@ -209,6 +214,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert SymphonyElixir.Tracker.adapter() == Memory
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_ids(["issue-1"])
+    assert {:ok, []} = SymphonyElixir.Tracker.fetch_issues_with_agent_messages(["In Review"])
 
     binding = SymphonyElixir.Tracker.bind_agent_tools()
     assert binding.adapter == Memory
@@ -236,7 +242,44 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, ["issue-1"]} = Adapter.fetch_issues_by_ids(["issue-1"])
     assert_receive {:fetch_issues_by_ids_called, ["issue-1"]}
 
+    assert {:ok, ["In Review"]} = Adapter.fetch_issues_with_agent_messages(["In Review"])
+    assert_receive {:fetch_issues_with_agent_messages_called, ["In Review"]}
+
+    assert {:ok, ["Reviewing"]} =
+             SymphonyElixir.Tracker.fetch_issues_with_agent_messages(["Reviewing"])
+
+    assert_receive {:fetch_issues_with_agent_messages_called, ["Reviewing"]}
+
     assert [%{"name" => "linear_graphql"}] = Adapter.agent_tool_specs()
+  end
+
+  test "linear adapter validates owner comment routing configuration" do
+    settings = Config.settings!().tracker
+
+    assert :ok = Adapter.validate_config(settings)
+    assert {:error, :invalid_linear_endpoint} = Adapter.validate_config(%{settings | endpoint: ""})
+    assert {:error, :missing_linear_api_token} = Adapter.validate_config(%{settings | api_key: nil})
+    assert {:error, :missing_linear_project_slug} = Adapter.validate_config(%{settings | project_slug: nil})
+    assert {:error, :invalid_linear_assignee} = Adapter.validate_config(%{settings | assignee: " "})
+
+    assert {:error, :invalid_linear_comment_command_prefix} =
+             Adapter.validate_config(%{settings | comment_command_prefix: "symphony"})
+
+    assert {:error, :invalid_linear_comment_command_prefix} =
+             Adapter.validate_config(%{settings | comment_command_prefix: "@sym phony"})
+
+    assert {:error, :invalid_linear_comment_command_prefix} =
+             Adapter.validate_config(%{settings | comment_command_prefix: 42})
+
+    assert {:error, :missing_linear_comment_wake_states} =
+             Adapter.validate_config(%{settings | comment_command_prefix: "@symphony"})
+
+    assert :ok =
+             Adapter.validate_config(%{
+               settings
+               | comment_command_prefix: "@symphony",
+                 comment_wake_states: ["In Review"]
+             })
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do

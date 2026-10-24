@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Codex.ThreadStore
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -260,7 +261,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
+         {:ok, issues} <- fetch_poll_issues(state),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
@@ -305,6 +306,46 @@ defmodule SymphonyElixir.Orchestrator do
       false ->
         state
     end
+  end
+
+  defp fetch_poll_issues(%State{} = state) do
+    with {:ok, active_issues} <-
+           Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
+      conversation_issues = fetch_conversation_issues(state)
+      {:ok, merge_poll_issues(active_issues, conversation_issues)}
+    end
+  end
+
+  defp fetch_conversation_issues(%State{}) do
+    tracker = Config.settings!().tracker
+
+    case Tracker.fetch_issues_with_agent_messages(tracker.comment_wake_states) do
+      {:ok, issues} ->
+        issues
+        |> Enum.map(&with_pending_messages/1)
+        |> Enum.filter(&(conversation_pending?(&1) and ThreadStore.bound?(&1)))
+
+      {:error, reason} ->
+        Logger.warning("Linear conversation poll failed; continuing normal issue polling: #{inspect(reason)}")
+
+        []
+    end
+  end
+
+  defp merge_poll_issues(active_issues, conversation_issues)
+       when is_list(active_issues) and is_list(conversation_issues) do
+    conversation_by_id = Map.new(conversation_issues, &{&1.id, &1})
+
+    merged_active =
+      Enum.map(active_issues, fn issue ->
+        case Map.get(conversation_by_id, issue.id) do
+          %Issue{agent_messages: messages} -> %{issue | agent_messages: messages}
+          _ -> issue
+        end
+      end)
+
+    active_ids = MapSet.new(merged_active, & &1.id)
+    merged_active ++ Enum.reject(conversation_issues, &MapSet.member?(active_ids, &1.id))
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -430,6 +471,10 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, false)
 
+      Issue.repository_labels(get_in(state.running, [issue.id, :issue])) != Issue.repository_labels(issue) ->
+        Logger.info("Issue repository route changed: #{issue_context(issue)}; preserving workspace and stopping active agent")
+        terminate_running_issue(state, issue.id, false)
+
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
 
@@ -454,6 +499,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+    pending_issue = with_pending_messages(issue)
+
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
@@ -462,6 +509,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       !issue_routable?(issue) ->
         Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
+        release_issue_claim(state, issue.id)
+
+      conversation_pending?(pending_issue) ->
+        Logger.info("New Linear conversation message received: #{issue_context(issue)}; releasing input block")
+
         release_issue_claim(state, issue.id)
 
       active_issue_state?(issue.state, active_states) ->
@@ -825,7 +877,7 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(blocked, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+      issue_worker_slots_available?(state, issue, nil)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -863,14 +915,40 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     Enum.all?([id, identifier, title, state_name], &present_string?/1) and
       issue_routable?(issue) and
-      active_issue_state?(state_name, active_states) and
+      (active_issue_state?(state_name, active_states) or conversation_candidate?(issue)) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
+  defp with_pending_messages(%Issue{} = issue) do
+    pending_messages = ThreadStore.pending_messages(issue)
+
+    %{issue | agent_messages: pending_messages}
+  end
+
+  defp with_pending_messages(issue), do: issue
+
+  defp conversation_pending?(%Issue{agent_messages: messages}) when is_list(messages),
+    do: messages != []
+
+  defp conversation_pending?(_issue), do: false
+
+  defp conversation_candidate?(%Issue{state: state_name} = issue) do
+    conversation_pending?(issue) and ThreadStore.bound?(issue) and comment_wake_state?(state_name)
+  end
+
+  defp comment_wake_state?(state_name) when is_binary(state_name) do
+    normalized_state = normalize_issue_state(state_name)
+
+    Config.settings!().tracker.comment_wake_states
+    |> Enum.any?(&(normalize_issue_state(&1) == normalized_state))
+  end
+
+  defp comment_wake_state?(_state_name), do: false
+
   defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker.required_labels)
+    Issue.routable?(issue, Config.settings!().tracker.required_labels, Config.settings!().tracker.excluded_labels)
   end
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
@@ -918,7 +996,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp refresh_issue_for_dispatch(issue) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issues_by_ids/1, terminal_state_set()) do
+    case revalidate_issue_for_dispatch(
+           issue,
+           &Tracker.fetch_issues_by_ids/1,
+           terminal_state_set()
+         ) do
       {:ok, %Issue{} = refreshed_issue} ->
         {:ok, refreshed_issue}
 
@@ -939,8 +1021,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
+    thread_affinity = ThreadStore.worker_affinity(issue)
 
-    case select_worker_host(state, preferred_worker_host) do
+    case select_worker_host_with_thread_affinity(
+           state,
+           preferred_worker_host,
+           thread_affinity
+         ) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
         state
@@ -949,6 +1036,40 @@ defmodule SymphonyElixir.Orchestrator do
         spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
     end
   end
+
+  defp select_worker_host_with_thread_affinity(
+         %State{},
+         _preferred_worker_host,
+         {:bound, nil}
+       ),
+       do: nil
+
+  defp select_worker_host_with_thread_affinity(
+         %State{} = state,
+         _preferred_worker_host,
+         {:bound, thread_worker_host}
+       )
+       when is_binary(thread_worker_host) do
+    configured_hosts = Config.settings!().worker.ssh_hosts
+
+    cond do
+      thread_worker_host not in configured_hosts ->
+        :no_worker_capacity
+
+      worker_host_slots_available?(state, thread_worker_host) ->
+        thread_worker_host
+
+      true ->
+        :no_worker_capacity
+    end
+  end
+
+  defp select_worker_host_with_thread_affinity(%State{} = state, preferred_worker_host, :unbound) do
+    select_worker_host(state, preferred_worker_host)
+  end
+
+  defp select_worker_host_with_thread_affinity(%State{}, _preferred_worker_host, {:error, _reason}),
+    do: :no_worker_capacity
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
@@ -1003,10 +1124,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
+  defp revalidate_issue_for_dispatch(
+         %Issue{id: issue_id},
+         issue_fetcher,
+         terminal_states
+       )
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
+        refreshed_issue = with_pending_messages(refreshed_issue)
+
         if retry_candidate_issue?(refreshed_issue, terminal_states) do
           {:ok, refreshed_issue}
         else
@@ -1021,7 +1148,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
+  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states),
+    do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id) do
     %{
@@ -1095,6 +1223,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, issues} ->
         issues
         |> find_issue_by_id(issue_id)
+        |> with_pending_messages()
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
       {:error, reason} ->
@@ -1181,7 +1310,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host]) do
+         issue_worker_slots_available?(state, issue, metadata[:worker_host]) do
       case refresh_issue_for_dispatch(issue) do
         {:ok, %Issue{} = refreshed_issue} ->
           {:noreply, do_dispatch_issue(state, refreshed_issue, attempt, metadata[:worker_host])}
@@ -1218,6 +1347,14 @@ defmodule SymphonyElixir.Orchestrator do
          })
        )}
     end
+  end
+
+  defp issue_worker_slots_available?(%State{} = state, %Issue{} = issue, preferred_worker_host) do
+    select_worker_host_with_thread_affinity(
+      state,
+      preferred_worker_host,
+      ThreadStore.worker_affinity(issue)
+    ) != :no_worker_capacity
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
@@ -1320,14 +1457,6 @@ defmodule SymphonyElixir.Orchestrator do
       {_issue_id, %{worker_host: ^worker_host}} -> true
       _ -> false
     end)
-  end
-
-  defp worker_slots_available?(%State{} = state) do
-    select_worker_host(state, nil) != :no_worker_capacity
-  end
-
-  defp worker_slots_available?(%State{} = state, preferred_worker_host) do
-    select_worker_host(state, preferred_worker_host) != :no_worker_capacity
   end
 
   defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do

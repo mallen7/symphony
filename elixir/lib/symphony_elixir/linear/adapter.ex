@@ -10,6 +10,12 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec validate_config(map()) :: :ok | {:error, term()}
   def validate_config(tracker_settings) do
+    with :ok <- validate_required_settings(tracker_settings) do
+      validate_comment_settings(tracker_settings)
+    end
+  end
+
+  defp validate_required_settings(tracker_settings) do
     cond do
       not present_string?(tracker_settings.endpoint) ->
         {:error, :invalid_linear_endpoint}
@@ -28,11 +34,38 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  defp validate_comment_settings(tracker_settings) do
+    cond do
+      not is_nil(tracker_settings.comment_command_prefix) and
+          not valid_comment_command_prefix?(tracker_settings.comment_command_prefix) ->
+        {:error, :invalid_linear_comment_command_prefix}
+
+      present_string?(tracker_settings.comment_command_prefix) and
+          tracker_settings.comment_wake_states == [] ->
+        {:error, :missing_linear_comment_wake_states}
+
+      true ->
+        :ok
+    end
+  end
+
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids), do: client_module().fetch_issues_by_ids(issue_ids)
+
+  @spec fetch_issues_with_agent_messages([String.t()]) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_with_agent_messages(wake_states) do
+    client = client_module()
+
+    if function_exported?(client, :fetch_issues_with_agent_messages, 1) do
+      client.fetch_issues_with_agent_messages(wake_states)
+    else
+      {:ok, []}
+    end
+  end
 
   @spec agent_tool_specs() :: [map()]
   def agent_tool_specs, do: AgentTool.tool_specs()
@@ -51,4 +84,13 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_value), do: false
+
+  defp valid_comment_command_prefix?(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    String.starts_with?(trimmed, "@") and byte_size(trimmed) in 2..64 and
+      not Regex.match?(~r/\s/, trimmed)
+  end
+
+  defp valid_comment_command_prefix?(_value), do: false
 end

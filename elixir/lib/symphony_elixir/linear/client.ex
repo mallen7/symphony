@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Tracker.Issue
 
   @issue_page_size 50
+  @comment_page_size 50
   @max_error_body_log_bytes 1_000
 
   @query """
@@ -56,7 +57,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlug: String!, $first: Int!, $relationFirst: Int!) {
+  query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlug: String!, $first: Int!, $relationFirst: Int!, $commentLast: Int!) {
+    viewer { id }
     issues(filter: {id: {in: $ids}, project: {slugId: {eq: $projectSlug}}}, first: $first) {
       nodes {
         id
@@ -89,8 +91,78 @@ defmodule SymphonyElixir.Linear.Client do
             }
           }
         }
+        comments(last: $commentLast) {
+          nodes {
+            id
+            body
+            createdAt
+            updatedAt
+            user {
+              id
+              name
+            }
+          }
+        }
         createdAt
         updatedAt
+      }
+    }
+  }
+  """
+
+  @conversation_query """
+  query SymphonyLinearConversationPoll($projectSlug: String!, $wakeStateNames: [String!]!, $first: Int!, $relationFirst: Int!, $commentLast: Int!, $after: String) {
+    viewer { id }
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $wakeStateNames}}}, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        comments(last: $commentLast) {
+          nodes {
+            id
+            body
+            createdAt
+            updatedAt
+            user {
+              id
+              name
+            }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
       }
     }
   }
@@ -136,6 +208,23 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @spec fetch_issues_with_agent_messages([String.t()]) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_with_agent_messages(wake_states) when is_list(wake_states) do
+    normalized_states = Enum.map(wake_states, &to_string/1) |> Enum.uniq()
+
+    case normalized_states do
+      [] ->
+        {:ok, []}
+
+      states ->
+        with {:ok, tracker} <- configured_tracker_for_read(),
+             {:ok, assignee_filter} <- routing_assignee_filter() do
+          do_fetch_conversation_issues(tracker.project_slug, states, assignee_filter)
+        end
+    end
+  end
+
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
@@ -168,7 +257,7 @@ defmodule SymphonyElixir.Linear.Client do
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
   def normalize_issue_for_test(issue) when is_map(issue) do
-    normalize_issue(issue, nil)
+    normalize_issue(issue, nil, nil)
   end
 
   @doc false
@@ -186,7 +275,25 @@ defmodule SymphonyElixir.Linear.Client do
           nil
       end
 
-    normalize_issue(issue, assignee_filter)
+    normalize_issue(issue, assignee_filter, nil)
+  end
+
+  @doc false
+  @spec normalize_issue_for_test(map(), String.t() | nil, String.t() | nil) :: Issue.t() | nil
+  def normalize_issue_for_test(issue, assignee, viewer_id) when is_map(issue) do
+    assignee_filter =
+      case assignee do
+        value when is_binary(value) ->
+          case build_assignee_filter(value) do
+            {:ok, filter} -> filter
+            {:error, _reason} -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    normalize_issue(issue, assignee_filter, viewer_id)
   end
 
   @doc false
@@ -202,9 +309,9 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec fetch_issues_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+  @spec fetch_issues_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()}), binary()) ::
           {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_ids_for_test(issue_ids, graphql_fun)
+  def fetch_issues_by_ids_for_test(issue_ids, graphql_fun, project_slug \\ "test-project")
       when is_list(issue_ids) and is_function(graphql_fun, 2) do
     ids = Enum.uniq(issue_ids)
 
@@ -213,7 +320,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        do_fetch_issue_states(ids, "test-project", nil, graphql_fun)
+        do_fetch_issue_states(ids, project_slug, nil, graphql_fun)
     end
   end
 
@@ -221,9 +328,60 @@ defmodule SymphonyElixir.Linear.Client do
     do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
   end
 
+  defp do_fetch_conversation_issues(project_slug, wake_states, assignee_filter) do
+    do_fetch_conversation_issues_page(
+      project_slug,
+      wake_states,
+      assignee_filter,
+      nil,
+      []
+    )
+  end
+
+  defp do_fetch_conversation_issues_page(
+         project_slug,
+         wake_states,
+         assignee_filter,
+         after_cursor,
+         acc_issues
+       ) do
+    with {:ok, body} <-
+           graphql(scoped_query(@conversation_query, project_slug), %{
+             projectSlug: project_slug,
+             wakeStateNames: wake_states,
+             first: @issue_page_size,
+             relationFirst: @issue_page_size,
+             commentLast: @comment_page_size,
+             after: after_cursor
+           }),
+         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
+      updated_acc =
+        issues
+        |> Enum.filter(&(&1.agent_messages != []))
+        |> prepend_page_issues(acc_issues)
+
+      case next_page_cursor(page_info) do
+        {:ok, next_cursor} ->
+          do_fetch_conversation_issues_page(
+            project_slug,
+            wake_states,
+            assignee_filter,
+            next_cursor,
+            updated_acc
+          )
+
+        :done ->
+          {:ok, finalize_paginated_issues(updated_acc)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
   defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
     with {:ok, body} <-
-           graphql(@query, %{
+           graphql(scoped_query(@query, project_slug), %{
              projectSlug: project_slug,
              stateNames: state_names,
              first: @issue_page_size,
@@ -245,6 +403,15 @@ defmodule SymphonyElixir.Linear.Client do
       end
     end
   end
+
+  # Wildcard mode stays opt-in and never scans unrelated workspace issues.
+  defp scoped_query(query, "*") do
+    query
+    |> String.replace("$projectSlug: String!, ", "")
+    |> String.replace("project: {slugId: {eq: $projectSlug}}", "labels: {some: {name: {eq: \"symphony\"}}}")
+  end
+
+  defp scoped_query(query, _project_slug), do: query
 
   defp prepend_page_issues(issues, acc_issues) when is_list(issues) and is_list(acc_issues) do
     Enum.reverse(issues, acc_issues)
@@ -272,11 +439,12 @@ defmodule SymphonyElixir.Linear.Client do
   defp do_fetch_issue_states_page(ids, project_slug, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
-    case graphql_fun.(@query_by_ids, %{
+    case graphql_fun.(scoped_query(@query_by_ids, project_slug), %{
            ids: batch_ids,
            projectSlug: project_slug,
            first: length(batch_ids),
-           relationFirst: @issue_page_size
+           relationFirst: @issue_page_size,
+           commentLast: @comment_page_size
          }) do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response_strict(body, assignee_filter) do
@@ -401,14 +569,16 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp decode_linear_response(
-         %{"data" => %{"issues" => %{"nodes" => nodes}}},
+         %{"data" => %{"issues" => %{"nodes" => nodes}} = data},
          assignee_filter,
          malformed_policy
        )
        when is_list(nodes) do
+    viewer_id = get_in(data, ["viewer", "id"])
+
     issues =
       nodes
-      |> Enum.map(&normalize_issue(&1, assignee_filter))
+      |> Enum.map(&normalize_issue(&1, assignee_filter, viewer_id))
 
     malformed_count = Enum.count(issues, &is_nil/1)
 
@@ -438,16 +608,23 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp decode_linear_page_response(
          %{
-           "data" => %{
-             "issues" => %{
-               "nodes" => nodes,
-               "pageInfo" => %{"hasNextPage" => has_next_page, "endCursor" => end_cursor}
+           "data" =>
+             data = %{
+               "issues" => %{
+                 "nodes" => nodes,
+                 "pageInfo" => %{"hasNextPage" => has_next_page, "endCursor" => end_cursor}
+               }
              }
-           }
          },
          assignee_filter
        ) do
-    with {:ok, issues} <- decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+    viewer = data["viewer"]
+
+    with {:ok, issues} <-
+           decode_linear_response(
+             %{"data" => %{"issues" => %{"nodes" => nodes}, "viewer" => viewer}},
+             assignee_filter
+           ) do
       {:ok, issues, %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
     end
   end
@@ -462,7 +639,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp next_page_cursor(%{has_next_page: true}), do: {:error, :linear_missing_end_cursor}
   defp next_page_cursor(_), do: :done
 
-  defp normalize_issue(issue, assignee_filter) when is_map(issue) do
+  defp normalize_issue(issue, assignee_filter, viewer_id) when is_map(issue) do
     state_name = get_in(issue, ["state", "name"])
 
     if Enum.all?([issue["id"], issue["identifier"], issue["title"], state_name], &present_string?/1) do
@@ -480,6 +657,7 @@ defmodule SymphonyElixir.Linear.Client do
         url: issue["url"],
         assignee_id: assignee_field(assignee, "id"),
         blocked_by: blockers,
+        agent_messages: extract_agent_messages(issue, viewer_id),
         labels: extract_labels(issue),
         dispatchable: dispatchable?(state_name, blockers, assignee, assignee_filter),
         created_at: parse_datetime(issue["createdAt"]),
@@ -488,7 +666,7 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp normalize_issue(_issue, _assignee_filter), do: nil
+  defp normalize_issue(_issue, _assignee_filter, _viewer_id), do: nil
 
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil
@@ -557,9 +735,17 @@ defmodule SymphonyElixir.Linear.Client do
     tracker = Config.settings!().tracker
 
     cond do
-      is_nil(tracker.api_key) -> {:error, :missing_linear_api_token}
-      is_nil(tracker.project_slug) -> {:error, :missing_linear_project_slug}
-      true -> {:ok, tracker}
+      is_nil(tracker.api_key) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(tracker.project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      tracker.project_slug == "*" and "symphony" not in tracker.required_labels ->
+        {:error, :universal_scope_requires_symphony_label}
+
+      true ->
+        {:ok, tracker}
     end
   end
 
@@ -639,6 +825,63 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_blockers(_), do: []
+
+  defp extract_agent_messages(%{"comments" => %{"nodes" => comments}}, viewer_id)
+       when is_list(comments) and is_binary(viewer_id) do
+    comments
+    |> Enum.flat_map(&normalize_agent_message(&1, viewer_id))
+    |> Enum.sort_by(fn message ->
+      {DateTime.to_unix(message.updated_at, :microsecond), message.id}
+    end)
+  end
+
+  defp extract_agent_messages(_issue, _viewer_id), do: []
+
+  defp normalize_agent_message(
+         %{
+           "id" => id,
+           "body" => body,
+           "createdAt" => created_at,
+           "updatedAt" => updated_at
+         } = comment,
+         viewer_id
+       )
+       when is_binary(id) and is_binary(body) and is_binary(viewer_id) do
+    with ^viewer_id <- get_in(comment, ["user", "id"]),
+         {:ok, command} <- agent_command(body),
+         %DateTime{} = parsed_created_at <- parse_datetime(created_at),
+         %DateTime{} = parsed_updated_at <- parse_datetime(updated_at) do
+      [
+        %{
+          id: id,
+          body: command,
+          author_id: get_in(comment, ["user", "id"]),
+          author_name: get_in(comment, ["user", "name"]),
+          created_at: parsed_created_at,
+          updated_at: parsed_updated_at
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp normalize_agent_message(_comment, _viewer_id), do: []
+
+  defp agent_command(body) when is_binary(body) do
+    case Config.settings!().tracker.comment_command_prefix do
+      prefix when is_binary(prefix) and prefix != "" ->
+        pattern = ~r/^#{Regex.escape(prefix)}(?:\s*:\s*|\s+)(.+)$/isu
+
+        case Regex.run(pattern, String.trim(body), capture: :all_but_first) do
+          [command] when command != "" -> {:ok, String.trim(command)}
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_value), do: false

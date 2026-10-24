@@ -669,6 +669,9 @@ Important nuance:
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
+- The implementation MAY persist an issue-to-thread binding across worker processes. When present,
+  later runs SHOULD resume that thread and SHOULD retain remote-worker host affinity while the
+  original host remains configured.
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
@@ -743,7 +746,8 @@ Tick sequence:
 
 1. Reconcile running issues.
 2. Run dispatch preflight validation.
-3. Fetch candidate issues from tracker using active states.
+3. Fetch candidate issues from tracker using active states and any supported explicit conversation
+   messages on routed non-terminal issues.
 4. Sort issues by dispatch priority.
 5. Dispatch eligible issues while slots remain.
 6. Notify observability/status consumers of state changes.
@@ -756,7 +760,8 @@ first.
 An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
-- Its state is in `active_states` and not in `terminal_states`.
+- Its state is not in `terminal_states`, and either its state is in `active_states` or it carries an
+  undelivered explicit conversation message supported by the tracker adapter.
 - Its adapter-provided `dispatchable` value is `true`.
 - It contains every label in `tracker.required_labels`.
 - It is not already in `running`.
@@ -1009,6 +1014,9 @@ Session identifiers:
 - Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
+- When an implementation persists issue thread bindings, reuse the same `thread_id` across later
+  worker runs. A rejected or context-mismatched binding MUST fail for operator review rather than
+  silently replacing the conversation.
 
 ### 10.3 Streaming Turn Processing
 
@@ -2310,3 +2318,19 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## Universal Linear routing (local extension)
+
+Set `tracker.provider.project_slug: "*"` to poll across Linear projects. This
+mode requires `tracker.required_labels` to include `symphony`; queries remain
+limited to that opt-in label, including reconciliation and terminal cleanup.
+Use the additional required label pattern `repo:*` to require exactly one safe
+`repo:<name>` label. `tracker.excluded_labels` temporarily excludes scopes,
+including dispatch, retry, and run reconciliation.
+
+Local workspace hooks receive `SYMPHONY_ISSUE_ID`,
+`SYMPHONY_ISSUE_IDENTIFIER`, and JSON `SYMPHONY_ISSUE_LABELS` through their
+environment. A universal workflow must validate its allowed GitHub owner, clone
+only the selected repository, and validate the repository origin before every
+run, preserving existing work on a mismatch. Use a fresh workspace root when
+migrating from dedicated workers, and prevent overlapping dispatch ownership.

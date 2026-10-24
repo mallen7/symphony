@@ -39,3 +39,32 @@ help with the setup:
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
+
+## Universal Linear routing (local extension)
+
+Set `tracker.provider.project_slug: "*"` to poll across Linear projects. This
+mode requires `tracker.required_labels` to include `symphony`; queries remain
+limited to that opt-in label, including reconciliation and terminal cleanup.
+Use the additional required label pattern `repo:*` to require exactly one safe
+`repo:<name>` label. `tracker.excluded_labels` temporarily excludes scopes,
+including dispatch, retry, and run reconciliation.
+
+Local workspace hooks receive `SYMPHONY_ISSUE_ID`,
+`SYMPHONY_ISSUE_IDENTIFIER`, and JSON `SYMPHONY_ISSUE_LABELS` through their
+environment. A universal workflow must validate its allowed GitHub owner, clone
+only the selected repository, and validate the repository origin before every
+run, preserving existing work on a mismatch. Use a fresh workspace root when
+migrating from dedicated workers, and prevent overlapping dispatch ownership.
+
+## Linear issue conversations (local extension)
+
+Set `tracker.comment_command_prefix` and `tracker.comment_wake_states` to enable
+owner replies. A comment such as `@symphony: explain the failed check` resumes
+the Codex thread already bound to that issue. Only comments authored by the
+Linear identity behind the configured API key are accepted, and the prefix must
+start the trimmed comment. Symphony delivers each comment ID once after a
+successful turn. The durable binding retains the repository route, workspace,
+worker host, and Codex home, so restarts preserve the same chat and MCP setup.
+If the binding cannot be resumed or its execution context changes, the run
+fails for operator review instead of silently replacing the conversation.
+Commands become eligible after the issue's first thread binding is persisted.

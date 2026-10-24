@@ -39,6 +39,107 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server resumes an existing thread and refuses to replace a rejected thread" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-resume-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-RESUME")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE}"
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$line" in
+          *'"method":"initialize"'*) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          *'"method":"thread/resume"'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-existing"}}}' ;;
+          *'"method":"turn/start"'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-resumed"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEX_TRACE", trace_file)
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-resume",
+        identifier: "MT-RESUME",
+        title: "Resume",
+        state: "In Review"
+      }
+
+      assert {:ok, %{thread_id: "thread-existing"}} =
+               AppServer.run(workspace, "resume", issue, resume_thread_id: "thread-existing")
+
+      payloads =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(payloads, &(&1["method"] == "thread/resume"))
+      refute Enum.any?(payloads, &(&1["method"] == "thread/start"))
+
+      resume_payload = Enum.find(payloads, &(&1["method"] == "thread/resume"))
+      assert resume_payload["params"]["excludeTurns"] == false
+
+      File.rm!(trace_file)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE}"
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$line" in
+          *'"method":"initialize"'*) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          *'"method":"thread/resume"'*) printf '%s\\n' '{"id":2,"error":{"code":-32602,"message":"thread not found"}}' ;;
+          *'"method":"thread/start"'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-replacement"}}}' ;;
+          *'"method":"turn/start"'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-replacement"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      assert {:error, {:response_error, %{"message" => "thread not found"}}} =
+               AppServer.run(workspace, "replace", issue, resume_thread_id: "thread-stale")
+
+      replacement_payloads =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(replacement_payloads, &(&1["method"] == "thread/resume"))
+      refute Enum.any?(replacement_payloads, &(&1["method"] == "thread/start"))
+    after
+      System.delete_env("SYMP_TEST_CODEX_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects symlink escape cwd paths under the workspace root" do
     test_root =
       Path.join(

@@ -397,3 +397,37 @@ you.
 ## License
 
 This project is licensed under the [Apache License 2.0](../LICENSE).
+
+## Universal Linear routing (local extension)
+
+Set `tracker.provider.project_slug: "*"` to poll across Linear projects. This
+mode requires `tracker.required_labels` to include `symphony`; queries remain
+limited to that opt-in label, including reconciliation and terminal cleanup.
+Use the additional required label pattern `repo:*` to require exactly one safe
+`repo:<name>` label. `tracker.excluded_labels` temporarily excludes scopes,
+including dispatch, retry, and run reconciliation.
+
+Local workspace hooks receive `SYMPHONY_ISSUE_ID`,
+`SYMPHONY_ISSUE_IDENTIFIER`, and JSON `SYMPHONY_ISSUE_LABELS` through their
+environment. A universal workflow must validate its allowed GitHub owner, clone
+only the selected repository, and validate the repository origin before every
+run, preserving existing work on a mismatch. Use a fresh workspace root when
+migrating from dedicated workers, and prevent overlapping dispatch ownership.
+
+## Linear issue conversations (local extension)
+
+Configure `tracker.comment_command_prefix` and
+`tracker.comment_wake_states`, then start a comment with the configured prefix,
+for example `@symphony: explain the failed check`. Only commands authored by
+the Linear identity behind the configured API key are delivered. The command
+can wake an issue in a configured state such as `In Review`; a running issue
+receives it at the next turn boundary.
+
+Symphony persists one Codex thread binding and delivered comment IDs per issue
+beneath `<workspace.root>/.symphony`. Later runs use `thread/resume`, including
+after a Symphony restart. Bindings also pin the repository route, workspace,
+worker host, and Codex home. A rejected or mismatched binding fails for operator
+review instead of silently replacing the conversation. Delivery is recorded
+only after the Codex turn completes, and an in-flight marker in thread history
+resolves the ambiguous case where Symphony restarts after submitting a turn.
+Commands become eligible after the issue's first thread binding is persisted.

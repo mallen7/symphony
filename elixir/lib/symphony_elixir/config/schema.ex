@@ -56,6 +56,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:provider, :map, default: %{})
       field(:secret_environment_names, {:array, :string}, default: [])
       field(:required_labels, {:array, :string}, default: [])
+      field(:excluded_labels, {:array, :string}, default: [])
+      field(:comment_command_prefix, :string)
+      field(:comment_wake_states, {:array, :string}, default: [])
       field(:active_states, {:array, :string})
       field(:terminal_states, {:array, :string})
     end
@@ -73,6 +76,9 @@ defmodule SymphonyElixir.Config.Schema do
           :assignee,
           :provider,
           :required_labels,
+          :excluded_labels,
+          :comment_command_prefix,
+          :comment_wake_states,
           :active_states,
           :terminal_states
         ],

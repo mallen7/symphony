@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Linear.AgentTool do
   Provider-native Linear tool exposed to Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Config, Linear.Client}
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -58,6 +58,7 @@ defmodule SymphonyElixir.Linear.AgentTool do
     client_opts = Keyword.take(opts, [:tracker_settings])
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
+         :ok <- reject_reserved_comment_command(query, variables),
          {:ok, response} <- linear_client.(query, variables, client_opts) do
       graphql_response(response)
     else
@@ -110,6 +111,34 @@ defmodule SymphonyElixir.Linear.AgentTool do
       _ -> {:error, :invalid_variables}
     end
   end
+
+  defp reject_reserved_comment_command(query, variables) do
+    comment_mutation? = Regex.match?(~r/\bcomment(?:Create|Update)\b/u, query)
+
+    if comment_mutation? and contains_reserved_command?(variables) do
+      {:error, :reserved_comment_command}
+    else
+      :ok
+    end
+  end
+
+  defp contains_reserved_command?(value) when is_map(value),
+    do: Enum.any?(value, fn {key, item} -> contains_reserved_command?(key) or contains_reserved_command?(item) end)
+
+  defp contains_reserved_command?(value) when is_list(value),
+    do: Enum.any?(value, &contains_reserved_command?/1)
+
+  defp contains_reserved_command?(value) when is_binary(value) do
+    case Config.settings!().tracker.comment_command_prefix do
+      prefix when is_binary(prefix) and prefix != "" ->
+        Regex.match?(~r/^#{Regex.escape(prefix)}(?:\s*:\s*|\s+)/iu, String.trim(value))
+
+      _ ->
+        false
+    end
+  end
+
+  defp contains_reserved_command?(_value), do: false
 
   defp graphql_response(response) do
     success =
@@ -165,6 +194,14 @@ defmodule SymphonyElixir.Linear.AgentTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:reserved_comment_command) do
+    %{
+      "error" => %{
+        "message" => "The configured Linear comment command prefix is reserved for owner-to-Symphony messages. Write agent progress without that prefix."
       }
     }
   end

@@ -4,6 +4,13 @@ tracker:
   provider:
     project_slug: "symphony-0c79b11b75ea"
   required_labels: []
+  comment_command_prefix: "@symphony"
+  comment_wake_states:
+    - Todo
+    - In Progress
+    - Merging
+    - Rework
+    - In Review
   active_states:
     - Todo
     - In Progress
@@ -327,3 +334,31 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 - <only include when something was confusing during execution>
 ````
+
+## Universal Linear routing (local extension)
+
+Set `tracker.provider.project_slug: "*"` to poll across Linear projects. This
+mode requires `tracker.required_labels` to include `symphony`; queries remain
+limited to that opt-in label, including reconciliation and terminal cleanup.
+Use the additional required label pattern `repo:*` to require exactly one safe
+`repo:<name>` label. `tracker.excluded_labels` temporarily excludes scopes,
+including dispatch, retry, and run reconciliation.
+
+Local workspace hooks receive `SYMPHONY_ISSUE_ID`,
+`SYMPHONY_ISSUE_IDENTIFIER`, and JSON `SYMPHONY_ISSUE_LABELS` through their
+environment. A universal workflow must validate its allowed GitHub owner, clone
+only the selected repository, and validate the repository origin before every
+run, preserving existing work on a mismatch. Use a fresh workspace root when
+migrating from dedicated workers, and prevent overlapping dispatch ownership.
+
+## Linear issue conversations (local extension)
+
+When `tracker.comment_command_prefix` is configured, the owner can continue
+this issue's Codex conversation with a comment such as `@symphony: explain the
+failed check`. The prefix is reserved for owner commands and must not begin an
+agent-authored comment. Symphony delivers accepted commands once, wakes only
+configured `comment_wake_states`, and resumes the issue's existing Codex thread
+across later runs. Commands become eligible after Symphony has persisted the
+issue's first thread binding. Treat the delivered command as the latest user
+guidance, update the existing workpad when a response is useful, and keep the
+normal authority and issue-scope limits.

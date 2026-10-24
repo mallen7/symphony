@@ -21,6 +21,8 @@ defmodule SymphonyElixir.Tracker do
 
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   @callback fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  @callback fetch_issues_with_agent_messages([String.t()]) ::
+              {:ok, [Issue.t()]} | {:error, term()}
   @callback agent_tool_specs() :: [map()]
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
@@ -28,7 +30,8 @@ defmodule SymphonyElixir.Tracker do
 
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
-                      validate_config: 1
+                      validate_config: 1,
+                      fetch_issues_with_agent_messages: 1
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(states) do
@@ -38,6 +41,19 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @spec fetch_issues_with_agent_messages([String.t()]) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_with_agent_messages(wake_states) when is_list(wake_states) do
+    adapter = adapter()
+
+    if Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, :fetch_issues_with_agent_messages, 1) do
+      adapter.fetch_issues_with_agent_messages(wake_states)
+    else
+      {:ok, []}
+    end
   end
 
   @doc """
