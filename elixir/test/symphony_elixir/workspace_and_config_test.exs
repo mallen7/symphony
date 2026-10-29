@@ -1024,6 +1024,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              }
            }
 
+    assert config.codex.mcp_elicitation_auto_approve == %{}
+
     assert config.codex.thread_sandbox == "workspace-write"
 
     assert {:ok, canonical_default_workspace_root} =
@@ -1073,6 +1075,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: explicit_root,
       codex_approval_policy: "on-request",
+      codex_mcp_elicitation_auto_approve: %{
+        codex_knowledge: ["project_state", "build_context"]
+      },
       codex_thread_sandbox: "workspace-write",
       codex_turn_sandbox_policy: %{
         type: "workspaceWrite",
@@ -1082,6 +1087,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     assert config.codex.approval_policy == "on-request"
+
+    assert config.codex.mcp_elicitation_auto_approve == %{
+             "codex_knowledge" => ["project_state", "build_context"]
+           }
+
     assert config.codex.thread_sandbox == "workspace-write"
 
     assert Config.codex_turn_sandbox_policy(explicit_workspace) == %{
@@ -1112,6 +1122,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_mcp_elicitation_auto_approve: %{codex_knowledge: ["*"]}
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.mcp_elicitation_auto_approve"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_mcp_elicitation_auto_approve: %{"*" => ["project_state"]}
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.mcp_elicitation_auto_approve"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_mcp_elicitation_auto_approve: %{codex_knowledge: "project_state"}
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.mcp_elicitation_auto_approve"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
