@@ -196,6 +196,11 @@ defmodule SymphonyElixir.Config.Schema do
         }
       )
 
+      # Exact MCP server/tool pairs that an unattended app-server client may
+      # accept when Codex emits a form elicitation for tool-call consent.
+      # An empty map preserves the fail-closed default.
+      field(:mcp_elicitation_auto_approve, :map, default: %{})
+
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
@@ -211,6 +216,7 @@ defmodule SymphonyElixir.Config.Schema do
         [
           :command,
           :approval_policy,
+          :mcp_elicitation_auto_approve,
           :thread_sandbox,
           :turn_sandbox_policy,
           :turn_timeout_ms,
@@ -220,6 +226,7 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
+      |> validate_change(:mcp_elicitation_auto_approve, &validate_mcp_elicitation_auto_approve/2)
       |> validate_change(:command, fn :command, command ->
         if command != "" and String.trim(command) == "" do
           [command: "can't be blank"]
@@ -230,6 +237,25 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+
+    defp validate_mcp_elicitation_auto_approve(:mcp_elicitation_auto_approve, rules)
+         when is_map(rules) do
+      invalid =
+        Enum.find(rules, fn
+          {server, tools} when is_binary(server) and is_list(tools) ->
+            String.trim(server) in ["", "*"] or tools == [] or
+              Enum.any?(tools, &(not is_binary(&1) or String.trim(&1) == "" or &1 == "*"))
+
+          _ ->
+            true
+        end)
+
+      if invalid do
+        [mcp_elicitation_auto_approve: "must map non-empty server names to non-empty exact tool-name lists"]
+      else
+        []
+      end
     end
   end
 
@@ -463,6 +489,7 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
+        mcp_elicitation_auto_approve: normalize_keys(settings.codex.mcp_elicitation_auto_approve),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 

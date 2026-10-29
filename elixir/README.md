@@ -156,6 +156,10 @@ Notes:
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each
   app-server update resets it; it is not a total turn runtime cap.
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
+- `codex.mcp_elicitation_auto_approve` is an optional map of exact MCP server names to exact tool
+  names. It lets unattended workers accept only matching `mcpServer/elicitation/request` form
+  confirmations for MCP tool calls. The default is `{}`; wildcard entries, URL elicitations,
+  arbitrary forms, and unlisted tools remain fail-closed.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
