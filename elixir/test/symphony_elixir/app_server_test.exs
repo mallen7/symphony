@@ -816,7 +816,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server auto-approves only an exact configured MCP form elicitation" do
+  test "app server auto-approves an exact configured MCP form elicitation with canonical empty-object schema" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -848,7 +848,7 @@ defmodule SymphonyElixir.AppServerTest do
           3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-720"}}}' ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-720"}}}'
-            printf '%s\\n' '{"id":112,"method":"mcpServer/elicitation/request","params":{"serverName":"codex_knowledge","mode":"form","message":"Allow the codex_knowledge MCP server to run tool \\"project_state\\"?","requestedSchema":{},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_description":"Read project state"},"threadId":"thread-720","turnId":"turn-720"}}'
+            printf '%s\\n' '{"id":112,"method":"mcpServer/elicitation/request","params":{"serverName":"codex_knowledge","mode":"form","message":"Allow the codex_knowledge MCP server to run tool \\"project_state\\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_description":"Read project state","tool_params":{"project_id":"pantheon"},"tool_params_display":[{"display_name":"project_id","name":"project_id","value":"pantheon"}]},"threadId":"thread-720","turnId":"turn-720"}}'
             ;;
           5)
             printf '%s\\n' '{"method":"turn/completed"}'
