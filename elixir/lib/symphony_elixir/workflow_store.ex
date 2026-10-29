@@ -11,6 +11,9 @@ defmodule SymphonyElixir.WorkflowStore do
   alias SymphonyElixir.Workflow
 
   @poll_interval_ms 1_000
+  @workflow_cache_key {__MODULE__, :workflow}
+  @settings_cache_key {__MODULE__, :settings}
+  @cache_missing :symphony_workflow_cache_missing
 
   defmodule State do
     @moduledoc false
@@ -27,7 +30,10 @@ defmodule SymphonyElixir.WorkflowStore do
   def current do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :current)
+        case :persistent_term.get(@workflow_cache_key, @cache_missing) do
+          @cache_missing -> GenServer.call(__MODULE__, :current)
+          workflow -> {:ok, workflow}
+        end
 
       _ ->
         Workflow.load()
@@ -38,7 +44,10 @@ defmodule SymphonyElixir.WorkflowStore do
   def settings do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :settings)
+        case :persistent_term.get(@settings_cache_key, @cache_missing) do
+          @cache_missing -> GenServer.call(__MODULE__, :settings)
+          settings -> {:ok, settings}
+        end
 
       _ ->
         case load_state(Workflow.workflow_file_path()) do
@@ -66,6 +75,7 @@ defmodule SymphonyElixir.WorkflowStore do
   def init(_opts) do
     case load_state(Workflow.workflow_file_path()) do
       {:ok, state} ->
+        publish_state(state)
         schedule_poll()
         {:ok, state}
 
@@ -76,18 +86,13 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @impl true
   def handle_call(:current, _from, %State{} = state) do
-    case reload_state(state) do
-      {:ok, new_state} ->
-        {:reply, {:ok, new_state.workflow}, new_state}
-
-      {:error, _reason, new_state} ->
-        {:reply, {:ok, new_state.workflow}, new_state}
-    end
+    {:reply, {:ok, state.workflow}, state}
   end
 
   def handle_call(:force_reload, _from, %State{} = state) do
     case reload_state(state) do
       {:ok, new_state} ->
+        publish_state(new_state)
         {:reply, :ok, new_state}
 
       {:error, reason, new_state} ->
@@ -96,13 +101,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   def handle_call(:settings, _from, %State{} = state) do
-    case reload_state(state) do
-      {:ok, new_state} ->
-        {:reply, {:ok, new_state.settings}, new_state}
-
-      {:error, _reason, new_state} ->
-        {:reply, {:ok, new_state.settings}, new_state}
-    end
+    {:reply, {:ok, state.settings}, state}
   end
 
   @impl true
@@ -132,6 +131,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defp reload_path(path, state) do
     case load_state(path) do
       {:ok, new_state} ->
+        publish_state(new_state)
         {:ok, new_state}
 
       {:error, reason} ->
@@ -177,5 +177,10 @@ defmodule SymphonyElixir.WorkflowStore do
 
   defp log_reload_error(path, reason) do
     Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")
+  end
+
+  defp publish_state(%State{} = state) do
+    :persistent_term.put(@workflow_cache_key, state.workflow)
+    :persistent_term.put(@settings_cache_key, state.settings)
   end
 end

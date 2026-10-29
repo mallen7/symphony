@@ -153,6 +153,43 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:stop, {:missing_workflow_file, ^missing_path, :enoent}} = WorkflowStore.init([])
   end
 
+  test "workflow reads use the last verified cache while the reload process is busy" do
+    ensure_workflow_store_running()
+    assert :ok = WorkflowStore.force_reload()
+    assert {:ok, expected_workflow} = WorkflowStore.current()
+    assert {:ok, expected_settings} = WorkflowStore.settings()
+    pid = Process.whereis(WorkflowStore)
+
+    :sys.suspend(pid)
+
+    try do
+      assert {:ok, ^expected_workflow} =
+               Task.async(fn -> WorkflowStore.current() end) |> Task.await(100)
+
+      assert {:ok, ^expected_settings} =
+               Task.async(fn -> WorkflowStore.settings() end) |> Task.await(100)
+    after
+      :sys.resume(pid)
+    end
+  end
+
+  test "workflow reads fall back to the live store when a verified cache entry is absent" do
+    ensure_workflow_store_running()
+    assert :ok = WorkflowStore.force_reload()
+    assert {:ok, expected_workflow} = WorkflowStore.current()
+    assert {:ok, expected_settings} = WorkflowStore.settings()
+
+    :persistent_term.erase({WorkflowStore, :workflow})
+    :persistent_term.erase({WorkflowStore, :settings})
+
+    try do
+      assert {:ok, ^expected_workflow} = WorkflowStore.current()
+      assert {:ok, ^expected_settings} = WorkflowStore.settings()
+    after
+      assert :ok = WorkflowStore.force_reload()
+    end
+  end
+
   test "workflow store start_link and poll callback cover missing-file error paths" do
     ensure_workflow_store_running()
     existing_path = Workflow.workflow_file_path()
