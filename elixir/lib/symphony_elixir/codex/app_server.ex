@@ -847,7 +847,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     tool = mcp_elicitation_tool_name(params, server)
     allowed_tools = get_in(approval_controls, [:mcp_elicitations, server]) || []
 
-    if mode == "form" and schema == %{} and kind == "mcp_tool_call" and
+    if mode == "form" and
+         schema in [%{}, %{"type" => "object", "properties" => %{}}] and
+         kind == "mcp_tool_call" and
          is_binary(tool) and tool in allowed_tools do
       send_message(port, %{"id" => id, "result" => %{"action" => "accept", "content" => %{}}})
 
